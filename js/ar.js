@@ -2,9 +2,15 @@
 import { OBJECTS } from './objects.js';
 import { $, loadScript, exists } from './utils.js';
 
-// --------------------------------------------------
-// 1. LIBRARY CONFIGURATION
-// --------------------------------------------------
+/* ==========================================
+   AR VISION - AR ENGINE
+   MindAR + A-Frame + Touch Gestures
+========================================== */
+
+
+/* ==========================================
+   LIBRARY URLS
+========================================== */
 
 const AFRAME =
   'https://aframe.io/releases/1.5.0/aframe.min.js';
@@ -15,55 +21,65 @@ const MINDAR =
 const ANIMATION_MIXER =
   'https://cdn.jsdelivr.net/npm/aframe-extras@7.5.4/dist/aframe-extras.min.js';
 
-const TARGETS = 'assets/targets/targets.mind';
+const TARGETS =
+  'assets/targets/targets.mind';
 
-// --------------------------------------------------
-// 2. GLOBAL AR STATE
-// --------------------------------------------------
+
+/* ==========================================
+   AR STATE
+========================================== */
 
 let scene = null;
 let active = null;
-
 let found = new Set();
-let view = {};
-let missing = new Set();
 
 let starting = false;
 let sessionId = 0;
 
-// --------------------------------------------------
-// 3. UI HELPERS
-// --------------------------------------------------
+let availableObjects = [];
+let missing = [];
 
-const say = (message) => {
+let gestureCleanup = null;
+
+const view = {};
+
+const transformFrames = new WeakMap();
+
+
+/* ==========================================
+   DOM HELPERS
+========================================== */
+
+function say(message) {
   const status = $('#ar-status');
 
   if (status) {
     status.textContent = message;
   }
-};
+}
 
-const show = (selector, visible) => {
+function show(selector, visible = true) {
   const element = $(selector);
 
   if (element) {
     element.classList.toggle('hidden', !visible);
   }
-};
+}
 
 function resetLoading() {
   show('#ar-loading', false);
+  show('#ar-prep', false);
+  show('#ar-error', false);
 }
 
-export function fail(message) {
-  starting = false;
-
+function fail(message) {
   resetLoading();
 
   const errorMessage = $('#ar-error-msg');
 
   if (errorMessage) {
-    errorMessage.textContent = message;
+    errorMessage.textContent =
+      message || 'Something went wrong. Please try again.';
   }
 
   show('#ar-error', true);
@@ -71,240 +87,456 @@ export function fail(message) {
   console.error('[AR VISION]', message);
 }
 
-// --------------------------------------------------
-// 4. LIBRARY INITIALISATION
-// --------------------------------------------------
 
-async function loadARLibraries() {
-  console.log('[AR VISION] Loading AR libraries...');
+/* ==========================================
+   VECTOR HELPERS
+========================================== */
 
-  // A-Frame must load first.
-  await loadScript(AFRAME);
-
-  if (!window.AFRAME) {
-    throw new Error('A-Frame failed to initialise.');
+function parseVector(value, fallback = [0, 0, 0]) {
+  if (Array.isArray(value)) {
+    return value.map(Number);
   }
 
-  console.log('[AR VISION] A-Frame loaded.');
-
-  // Load MindAR after A-Frame.
-  await loadScript(MINDAR);
-
-  if (!window.MINDAR?.IMAGE) {
-    throw new Error('MindAR Image tracking was not initialised.');
+  if (typeof value !== 'string') {
+    return [...fallback];
   }
 
-  console.log('[AR VISION] MindAR loaded.');
+  const result = value.trim().split(/\s+/).map(Number);
 
-  // Load animation-mixer component.
-  await loadScript(ANIMATION_MIXER);
-
-  if (!window.AFRAME.components['animation-mixer']) {
-    throw new Error('Animation mixer component was not registered.');
+  if (
+    result.length !== 3 ||
+    result.some(number => !Number.isFinite(number))
+  ) {
+    return [...fallback];
   }
 
-  console.log('[AR VISION] Animation mixer loaded.');
+  return result;
 }
 
-// --------------------------------------------------
-// 5. CHECK MODEL FILES
-// --------------------------------------------------
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function getBaseTransform(object) {
+  return {
+    position: parseVector(object.position),
+    rotation: parseVector(object.rotation),
+    scale: parseVector(object.scale, [1, 1, 1])
+  };
+}
+
+
+/* ==========================================
+   LOAD AR LIBRARIES
+========================================== */
+
+async function loadARLibraries() {
+  if (!window.AFRAME) {
+    await loadScript(AFRAME);
+  }
+
+  if (!window.MINDAR?.IMAGE) {
+    await loadScript(MINDAR);
+  }
+
+  if (!window.AFRAME?.components?.['animation-mixer']) {
+    await loadScript(ANIMATION_MIXER);
+  }
+
+  if (!window.AFRAME) {
+    throw new Error('A-Frame could not be initialized.');
+  }
+
+  if (!window.MINDAR?.IMAGE) {
+    throw new Error('MindAR could not be initialized.');
+  }
+
+  if (!window.AFRAME.components['animation-mixer']) {
+    throw new Error('The 3D animation component could not be loaded.');
+  }
+}
+
+
+/* ==========================================
+   CHECK REQUIRED FILES
+========================================== */
 
 async function checkModels() {
-  missing.clear();
+  missing = [];
+  availableObjects = [];
 
   for (const object of OBJECTS) {
     const available = await exists(object.model);
 
-    if (!available) {
-      missing.add(object.id);
-
+    if (available) {
+      availableObjects.push(object);
+    } else {
+      missing.push(object.name);
       console.warn(
-        `[AR VISION] Missing model: ${object.model}`
+        '[AR VISION] Missing model:',
+        object.model
       );
     }
   }
+
+  if (availableObjects.length === 0) {
+    throw new Error(
+      'No 3D models were found. Check your assets/models folder.'
+    );
+  }
+
+  if (missing.length) {
+    console.warn(
+      '[AR VISION] Some models are missing:',
+      missing.join(', ')
+    );
+  }
 }
 
-// --------------------------------------------------
-// 6. CREATE AR TARGET ENTITIES
-// --------------------------------------------------
+
+/* ==========================================
+   CREATE TARGET ENTITIES
+========================================== */
 
 function createTargetEntities() {
-  return OBJECTS.map(object => {
+  return availableObjects.map(object => {
 
-    const modelMarkup = missing.has(object.id)
-      ? ''
-      : `
-        <a-entity
-          id="model-${object.id}"
-          gltf-model="url(${object.model})"
-          animation-mixer="clip: *; loop: repeat; timeScale: 1">
-        </a-entity>
-      `;
+    const target = document.createElement('a-entity');
 
-    return `
-      <a-entity
-        id="t-${object.id}"
-        mindar-image-target="targetIndex: ${object.targetIndex}">
+    target.setAttribute(
+      'mindar-image-target',
+      `targetIndex: ${object.targetIndex}`
+    );
 
-        <a-entity
-          id="w-${object.id}"
-          position="${object.position}"
-          rotation="${object.rotation}"
-          scale="${object.scale}">
+    target.dataset.objectId = object.id;
 
-          ${modelMarkup}
 
-        </a-entity>
+    // Wrapper receives all user transformations.
 
-      </a-entity>
-    `;
-  }).join('');
+    const wrapper = document.createElement('a-entity');
+
+    wrapper.id = `w-${object.id}`;
+
+    const base = getBaseTransform(object);
+
+    wrapper.setAttribute(
+      'position',
+      base.position.join(' ')
+    );
+
+    wrapper.setAttribute(
+      'rotation',
+      base.rotation.join(' ')
+    );
+
+    wrapper.setAttribute(
+      'scale',
+      base.scale.join(' ')
+    );
+
+
+    // Actual 3D model.
+
+    const model = document.createElement('a-entity');
+
+    model.id = `model-${object.id}`;
+
+    model.setAttribute(
+      'gltf-model',
+      object.model
+    );
+
+    model.setAttribute(
+      'animation-mixer',
+      'clip: *; loop: repeat; timeScale: 1'
+    );
+
+    wrapper.appendChild(model);
+    target.appendChild(wrapper);
+
+    return target;
+  });
 }
 
-// --------------------------------------------------
-// 7. CREATE AR SCENE
-// --------------------------------------------------
+
+/* ==========================================
+   CREATE A-FRAME SCENE
+========================================== */
 
 function createScene() {
-
   const stage = $('#ar-stage');
 
   if (!stage) {
-    throw new Error('AR stage element #ar-stage was not found.');
+    throw new Error('AR camera stage was not found.');
   }
 
-  stage.innerHTML = `
-    <a-scene
-      mindar-image="
-        imageTargetSrc: ${TARGETS};
-        autoStart: false;
-        uiLoading: no;
-        uiScanning: no;
-        uiError: no
-      "
+  stage.innerHTML = '';
 
-      color-space="sRGB"
+  const arScene = document.createElement('a-scene');
 
-      renderer="
-        colorManagement: true;
-        physicallyCorrectLights: true;
-        antialias: false
-      "
+  arScene.setAttribute(
+    'mindar-image',
+    `imageTargetSrc: ${TARGETS}; autoStart: false; uiScanning: false; uiLoading: no;`
+  );
 
-      vr-mode-ui="enabled: false"
+  arScene.setAttribute(
+    'embedded',
+    ''
+  );
 
-      device-orientation-permission-ui="enabled: false">
+  arScene.setAttribute(
+    'color-space',
+    'sRGB'
+  );
 
-      <a-camera
-        position="0 0 0"
-        look-controls="enabled: false">
-      </a-camera>
+  arScene.setAttribute(
+    'renderer',
+    'colorManagement: true; physicallyCorrectLights: true; antialias: false;'
+  );
 
-      <a-light
-        type="ambient"
-        intensity="1.1">
-      </a-light>
+  arScene.setAttribute(
+    'vr-mode-ui',
+    'enabled: false'
+  );
 
-      <a-light
-        type="directional"
-        intensity="1.4"
-        position="1 2 1">
-      </a-light>
+  arScene.setAttribute(
+    'device-orientation-permission-ui',
+    'enabled: false'
+  );
 
-      ${createTargetEntities()}
 
-    </a-scene>
-  `;
+  // Camera.
 
-  scene = $('#ar-stage a-scene');
+  const camera = document.createElement('a-camera');
 
-  if (!scene) {
-    throw new Error('Could not create the A-Frame scene.');
+  camera.setAttribute('position', '0 0 0');
+
+  camera.setAttribute('look-controls', 'enabled: false');
+
+  arScene.appendChild(camera);
+
+
+  // Lighting.
+
+  const ambient = document.createElement('a-entity');
+
+  ambient.setAttribute(
+    'light',
+    'type: ambient; intensity: 1.2'
+  );
+
+  arScene.appendChild(ambient);
+
+
+  const directional = document.createElement('a-entity');
+
+  directional.setAttribute(
+    'light',
+    'type: directional; intensity: 1.5'
+  );
+
+  directional.setAttribute(
+    'position',
+    '1 2 3'
+  );
+
+  arScene.appendChild(directional);
+
+
+  // Image targets and models.
+
+  for (const target of createTargetEntities()) {
+    arScene.appendChild(target);
   }
 
-  return scene;
+
+  scene = arScene;
+
+  stage.appendChild(arScene);
+
+  return arScene;
 }
 
-// --------------------------------------------------
-// 8. MODEL LOADING AND ANIMATION
-// --------------------------------------------------
+
+/* ==========================================
+   MODEL ANIMATION EVENTS
+========================================== */
 
 function registerModelEvents(object) {
-  if (missing.has(object.id)) return;
+  const model = $(`#model-${object.id}`);
 
-  const model = $('#model-' + object.id);
-
-  if (!model) {
-    console.warn(
-      '[AR VISION] Model entity not found:',
-      object.id
-    );
-    return;
-  }
+  if (!model) return;
 
   model.addEventListener('model-loaded', event => {
-    const gltf = event.detail?.model;
-    const animations = gltf?.animations || [];
 
     console.log(
-      `[AR VISION] ${object.name}: ${animations.length} animation(s) found.`,
-      animations.map(animation => animation.name)
+      '[AR VISION] Model loaded:',
+      object.name
     );
 
-    if (animations.length > 0) {
-      // Restart all embedded clips from the beginning.
-      model.setAttribute('animation-mixer', {
-        clip: '*',
-        loop: 'repeat',
-        timeScale: 1
-      });
+    const loadedModel = event.detail?.model;
+
+    if (
+      loadedModel &&
+      loadedModel.animations &&
+      loadedModel.animations.length
+    ) {
+      model.setAttribute(
+        'animation-mixer',
+        'clip: *; loop: repeat; timeScale: 1'
+      );
 
       console.log(
-        `[AR VISION] Animation enabled for ${object.name}`
-      );
-    } else {
-      console.info(
-        `[AR VISION] ${object.name} has no embedded animations.`
+        '[AR VISION] Animation enabled:',
+        object.name
       );
     }
+
   });
 
   model.addEventListener('model-error', event => {
+
     console.error(
-      `[AR VISION] Failed to load ${object.name}:`,
-      event.detail
+      '[AR VISION] Model loading error:',
+      object.name,
+      event
     );
 
-    if (active?.id === object.id) {
-      say(`${object.name} model failed to load.`);
-    }
+    say(`Could not load ${object.name}.`);
+
   });
 }
 
-// --------------------------------------------------
-// 9. REGISTER TARGET EVENTS
-// --------------------------------------------------
 
-function registerTargetEvents() {
+/* ==========================================
+   INFORMATION PANEL
+========================================== */
 
-  OBJECTS.forEach(object => {
+function renderInfo(object) {
+  const title = $('#info-title');
+  const body = $('#info-body');
 
-    const target = $('#t-' + object.id);
+  if (!title || !body) return;
 
-    if (!target) {
-      console.error(
-        '[AR VISION] Target entity not found:',
-        object.id
+  title.textContent = object.name;
+
+  body.innerHTML = '';
+
+  const description = document.createElement('p');
+
+  description.textContent = object.blurb || '';
+
+  body.appendChild(description);
+
+
+  if (object.facts?.length) {
+
+    const heading = document.createElement('h4');
+
+    heading.textContent = 'Quick facts';
+
+    body.appendChild(heading);
+
+    const list = document.createElement('ul');
+
+    for (const fact of object.facts) {
+
+      const item = document.createElement('li');
+
+      const label = document.createElement('strong');
+
+      label.textContent = `${fact[0]}: `;
+
+      item.appendChild(label);
+
+      item.appendChild(
+        document.createTextNode(fact[1])
       );
 
-      return;
+      list.appendChild(item);
     }
 
+    body.appendChild(list);
+  }
+
+
+  if (object.trivia?.length) {
+
+    const heading = document.createElement('h4');
+
+    heading.textContent = 'Did you know?';
+
+    body.appendChild(heading);
+
+    const list = document.createElement('ul');
+
+    for (const fact of object.trivia) {
+
+      const item = document.createElement('li');
+
+      item.textContent = fact;
+
+      list.appendChild(item);
+    }
+
+    body.appendChild(list);
+  }
+}
+
+
+/* ==========================================
+   TARGET FOUND / LOST
+========================================== */
+
+function onFound(object) {
+  active = object;
+
+  found.add(object.id);
+
+  renderInfo(object);
+
+  show('#ar-guide', false);
+  show('#ar-info', true);
+  show('#ar-controls', true);
+
+  const count = $('#ar-count');
+
+  if (count) {
+    count.textContent =
+      `${found.size}/${OBJECTS.length} discovered`;
+  }
+
+  say(`${object.name} detected. Drag to explore!`);
+}
+
+
+function onLost(object) {
+  if (active?.id === object.id) {
+    active = null;
+  }
+
+  show('#ar-info', false);
+  show('#ar-controls', false);
+  show('#ar-guide', true);
+
+  say('Point your camera at an AR Vision image.');
+}
+
+
+function registerTargetEvents() {
+  for (const object of availableObjects) {
+
+    const target = $(
+      `[data-object-id="${object.id}"]`,
+      scene
+    );
+
+    if (!target) continue;
+
     view[object.id] = {
-      ry: 0,
-      z: 1
+      rotation: 0,
+      zoom: 1,
+      vertical: 0
     };
 
     target.addEventListener('targetFound', () => {
@@ -316,417 +548,25 @@ function registerTargetEvents() {
     });
 
     registerModelEvents(object);
-  });
-}
-
-// --------------------------------------------------
-// 10. START AR EXPERIENCE
-// --------------------------------------------------
-
-export async function startAR() {
-
-  // Prevent duplicate camera sessions.
-  if (starting || scene) {
-    console.warn('[AR VISION] AR session already active.');
-    return;
-  }
-
-  starting = true;
-
-  const currentSession = ++sessionId;
-
-  show('#ar-error', false);
-  show('#ar-loading', true);
-  show('#ar-guide', false);
-  show('#ar-info', false);
-  show('#ar-controls', false);
-
-  say('Preparing camera…');
-
-  // Reset session information.
-  active = null;
-  found.clear();
-  view = {};
-  missing.clear();
-
-  const count = $('#ar-count');
-
-  if (count) {
-    count.textContent = `0/${OBJECTS.length} discovered`;
-  }
-
-  // Camera permission and secure-context check.
-  if (
-    !window.isSecureContext ||
-    !navigator.mediaDevices?.getUserMedia
-  ) {
-
-    starting = false;
-
-    return fail(
-      'Camera needs a secure connection. Open this site over HTTPS (or localhost) in Chrome.'
-    );
-  }
-
-  try {
-
-    // Check tracking file.
-    if (!(await exists(TARGETS))) {
-      throw new Error(
-        'Tracking file missing: assets/targets/targets.mind'
-      );
-    }
-
-    if (currentSession !== sessionId) return;
-
-    // Load libraries.
-    await loadARLibraries();
-
-    if (currentSession !== sessionId) return;
-
-    // Check GLB models.
-    await checkModels();
-
-    if (currentSession !== sessionId) return;
-
-    // Create the scene.
-    const arScene = createScene();
-
-    // Register target and model events.
-    registerTargetEvents();
-
-    // Handle camera/tracker errors.
-    arScene.addEventListener('arError', (event) => {
-
-      console.error(
-        '[AR VISION] AR camera error:',
-        event.detail
-      );
-
-      fail(
-        'The camera could not start. Allow camera permission, close other apps using it, then tap Restart.'
-      );
-    });
-
-    // MindAR ready event.
-    arScene.addEventListener('arReady', () => {
-
-      if (currentSession !== sessionId) return;
-
-      starting = false;
-
-      resetLoading();
-
-      say('Searching for your image…');
-
-      show('#ar-guide', true);
-
-      console.log(
-        '[AR VISION] Camera and image tracker ready.'
-      );
-    });
-
-    // Wait for A-Frame scene loading.
-    await new Promise((resolve) => {
-
-      if (arScene.hasLoaded) {
-        resolve();
-        return;
-      }
-
-      arScene.addEventListener(
-        'loaded',
-        resolve,
-        { once: true }
-      );
-    });
-
-    if (currentSession !== sessionId) return;
-
-    // Start MindAR.
-    const tracker = arScene.systems['mindar-image-system'];
-
-    if (!tracker) {
-      throw new Error(
-        'MindAR image tracking system was not found.'
-      );
-    }
-
-    console.log('[AR VISION] Starting image tracker...');
-
-    await tracker.start();
-
-    if (currentSession !== sessionId) return;
-
-    console.log('[AR VISION] Tracker start requested.');
-
-  } catch (error) {
-
-    if (currentSession !== sessionId) return;
-
-    console.error(
-      '[AR VISION] Startup error:',
-      error
-    );
-
-    const message =
-      error?.name === 'NotAllowedError'
-        ? 'Camera permission was denied. Allow it in your browser settings, then tap Restart.'
-
-        : error?.name === 'NotFoundError'
-        ? 'No camera found on this device. Try 3D preview instead.'
-
-        : error?.name === 'NotReadableError'
-        ? 'The camera is in use by another app. Close it and tap Restart.'
-
-        : error?.name === 'OverconstrainedError'
-        ? 'The requested camera configuration is not supported by this device.'
-
-        : error?.message?.includes('Tracking file missing')
-        ? 'Tracking file missing: add assets/targets/targets.mind.'
-
-        : 'Could not start AR: ' + (error?.message || error);
-
-    // Clean up a failed session before showing the error.
-    stopAR();
-
-    fail(message);
   }
 }
 
-// --------------------------------------------------
-// 11. IMAGE TARGET FOUND
-// --------------------------------------------------
 
-function onFound(object) {
+/* ==========================================
+   SMOOTH MODEL TRANSFORM
+========================================== */
+
+function smoothTransform(
+  wrapper,
+  targetRotation,
+  targetScale,
+  targetPosition,
+  duration = 180
+) {
+  if (!wrapper?.object3D) return;
 
-  active = object;
-
-  show('#ar-guide', false);
-
-  // Update discovered count.
-  if (!found.has(object.id)) {
-
-    found.add(object.id);
-
-    const count = $('#ar-count');
-
-    if (count) {
-      count.textContent =
-        `${found.size}/${OBJECTS.length} discovered`;
-    }
-  }
-
-  say(
-    missing.has(object.id)
-      ? `${object.name} detected, but its 3D model file is missing.`
-      : 'Object detected! Explore in 3D.'
-  );
-
-  // Display object information.
-  const title = $('#info-title');
-  const body = $('#info-body');
-
-  if (title) {
-    title.textContent = object.name;
-  }
-
-  if (body) {
-
-    body.innerHTML =
-      '<dl>' +
-
-      object.facts
-        .map(fact =>
-          `<dt>${fact[0]}</dt><dd>${fact[1]}</dd>`
-        )
-        .join('') +
-
-      '</dl><ul>' +
-
-      object.trivia
-        .map(item => `<li>${item}</li>`)
-        .join('') +
-
-      '</ul>';
-  }
-
-  show('#ar-info', true);
-  show('#ar-controls', true);
-
-  console.log(
-    '[AR VISION] Target detected:',
-    object.name
-  );
-}
-
-// --------------------------------------------------
-// 12. IMAGE TARGET LOST
-// --------------------------------------------------
-
-function onLost(object) {
-
-  if (active !== object) return;
-
-  active = null;
-
-  show('#ar-controls', false);
-  show('#ar-info', false);
-  show('#ar-guide', true);
-
-  say(
-    'Image not visible. Point your camera at the target again.'
-  );
-
-  console.log(
-    '[AR VISION] Target lost:',
-    object.name
-  );
-}
-
-// --------------------------------------------------
-// 13. ROTATE AND ZOOM CONTROLS
-// --------------------------------------------------
-
-
-export function transform(action) {
-  if (!active || !scene) return;
-
-  const state = view[active.id];
-  const wrapper = $('#w-' + active.id);
-
-  if (!state || !wrapper) return;
-
-  const scale = active.scale.trim().split(/\s+/).map(Number);
-  const rotation = active.rotation.trim().split(/\s+/).map(Number);
-
-  if (
-    scale.length !== 3 ||
-    rotation.length !== 3 ||
-    scale.some(Number.isNaN) ||
-    rotation.some(Number.isNaN)
-  ) {
-    console.error(
-      '[AR VISION] Invalid scale or rotation:',
-      active.id
-    );
-    return;
-  }
-
-  switch (action) {
-    case 'left':
-      state.ry -= 30;
-      break;
-
-    case 'right':
-      state.ry += 30;
-      break;
-
-    case 'in':
-      state.z = Math.min(state.z * 1.15, 4);
-      break;
-
-    case 'out':
-      state.z = Math.max(state.z / 1.15, 0.25);
-      break;
-
-    case 'reset':
-      state.ry = 0;
-      state.z = 1;
-      break;
-
-    default:
-      return;
-  }
-
-  const targetRotation = [
-    rotation[0],
-    rotation[1] + state.ry,
-    rotation[2]
-  ];
-
-  const targetScale = scale.map(value => value * state.z);
-
-  smoothTransform(wrapper, targetRotation, targetScale);
-}
-
-
-// --------------------------------------------------
-// 14. STOP AR AND CLEAN UP CAMERA
-// --------------------------------------------------
-
-export function stopAR() {
-
-  // Invalidate any pending asynchronous startup.
-  sessionId++;
-
-  starting = false;
-
-  // Stop MindAR tracker.
-  try {
-
-    const tracker =
-      scene?.systems?.['mindar-image-system'];
-
-    tracker?.stop();
-
-  } catch (error) {
-
-    console.warn(
-      '[AR VISION] Camera cleanup warning:',
-      error
-    );
-  }
-
-  // Stop camera video streams.
-  document.querySelectorAll('video').forEach(video => {
-
-    if (video.srcObject) {
-
-      video.srcObject
-        .getTracks()
-        .forEach(track => track.stop());
-
-      video.srcObject = null;
-    }
-
-    video.remove();
-  });
-
-  // Remove old AR scene.
-  const stage = $('#ar-stage');
-
-  if (stage) {
-    stage.innerHTML = '';
-  }
-
-  // Reset application state.
-  scene = null;
-  active = null;
-
-  found.clear();
-  missing.clear();
-  view = {};
-
-  const count = $('#ar-count');
-
-  if (count) {
-    count.textContent = `0/${OBJECTS.length} discovered`;
-  }
-
-  console.log('[AR VISION] AR session stopped and cleaned up.');
-}
-
-
-
-const transformFrames = new WeakMap();
-
-function smoothTransform(wrapper, targetRotation, targetScale) {
   const object3D = wrapper.object3D;
 
-  if (!object3D) return;
-
-  // Cancel an unfinished transformation if another button is pressed.
   const previousFrame = transformFrames.get(wrapper);
 
   if (previousFrame) {
@@ -745,53 +585,782 @@ function smoothTransform(wrapper, targetRotation, targetScale) {
     z: object3D.scale.z
   };
 
-  const toRadians = degrees => degrees * Math.PI / 180;
-
-  const endRotation = {
-    x: toRadians(targetRotation[0]),
-    y: toRadians(targetRotation[1]),
-    z: toRadians(targetRotation[2])
+  const startPosition = {
+    x: object3D.position.x,
+    y: object3D.position.y,
+    z: object3D.position.z
   };
 
-  const endScale = {
-    x: targetScale[0],
-    y: targetScale[1],
-    z: targetScale[2]
-  };
+  const rotationRadians = targetRotation.map(
+    value => value * Math.PI / 180
+  );
 
   const startTime = performance.now();
-  const duration = 220;
 
   function animate(now) {
-    const progress = Math.min((now - startTime) / duration, 1);
+    const progress = clamp(
+      (now - startTime) / duration,
+      0,
+      1
+    );
 
-    // Ease-out: quick response, gentle finish.
     const eased = 1 - Math.pow(1 - progress, 3);
 
     object3D.rotation.set(
-      startRotation.x + (endRotation.x - startRotation.x) * eased,
-      startRotation.y + (endRotation.y - startRotation.y) * eased,
-      startRotation.z + (endRotation.z - startRotation.z) * eased
+      startRotation.x +
+        (rotationRadians[0] - startRotation.x) * eased,
+
+      startRotation.y +
+        (rotationRadians[1] - startRotation.y) * eased,
+
+      startRotation.z +
+        (rotationRadians[2] - startRotation.z) * eased
     );
 
     object3D.scale.set(
-      startScale.x + (endScale.x - startScale.x) * eased,
-      startScale.y + (endScale.y - startScale.y) * eased,
-      startScale.z + (endScale.z - startScale.z) * eased
+      startScale.x +
+        (targetScale[0] - startScale.x) * eased,
+
+      startScale.y +
+        (targetScale[1] - startScale.y) * eased,
+
+      startScale.z +
+        (targetScale[2] - startScale.z) * eased
+    );
+
+    object3D.position.set(
+      startPosition.x +
+        (targetPosition[0] - startPosition.x) * eased,
+
+      startPosition.y +
+        (targetPosition[1] - startPosition.y) * eased,
+
+      startPosition.z +
+        (targetPosition[2] - startPosition.z) * eased
     );
 
     if (progress < 1) {
-      transformFrames.set(
-        wrapper,
-        requestAnimationFrame(animate)
-      );
+      const frame = requestAnimationFrame(animate);
+
+      transformFrames.set(wrapper, frame);
     } else {
       transformFrames.delete(wrapper);
     }
   }
 
-  transformFrames.set(
+  const frame = requestAnimationFrame(animate);
+
+  transformFrames.set(wrapper, frame);
+}
+
+
+/* ==========================================
+   GET CURRENT MODEL TRANSFORM
+========================================== */
+
+function getCurrentTransform(object) {
+  const wrapper = $(`#w-${object.id}`);
+
+  if (!wrapper) return null;
+
+  const base = getBaseTransform(object);
+
+  const state = view[object.id] || {
+    rotation: 0,
+    zoom: 1,
+    vertical: 0
+  };
+
+  return {
     wrapper,
-    requestAnimationFrame(animate)
+
+    rotation: [
+      base.rotation[0],
+      base.rotation[1] + state.rotation,
+      base.rotation[2]
+    ],
+
+    scale: base.scale.map(
+      value => value * state.zoom
+    ),
+
+    position: [
+      base.position[0],
+      base.position[1] + state.vertical,
+      base.position[2]
+    ]
+  };
+}
+
+
+/* ==========================================
+   APPLY GESTURE TRANSFORM
+========================================== */
+
+function applyGestureTransform(object) {
+  const transform = getCurrentTransform(object);
+
+  if (!transform) return;
+
+  const object3D = transform.wrapper.object3D;
+
+  if (!object3D) return;
+
+  // Direct updates during gestures prevent
+  // repeated animation restarts and input lag.
+
+  object3D.rotation.set(
+    transform.rotation[0] * Math.PI / 180,
+    transform.rotation[1] * Math.PI / 180,
+    transform.rotation[2] * Math.PI / 180
+  );
+
+  object3D.scale.set(
+    ...transform.scale
+  );
+
+  object3D.position.set(
+    ...transform.position
   );
 }
+
+
+/* ==========================================
+   RESET / LEGACY TRANSFORM CONTROLS
+========================================== */
+
+export function transform(action) {
+  if (!active) return;
+
+  const object = active;
+
+  const state = view[object.id];
+
+  if (!state) return;
+
+  const base = getBaseTransform(object);
+
+  const wrapper = $(`#w-${object.id}`);
+
+  if (!wrapper) return;
+
+
+  switch (action) {
+
+    case 'left':
+      state.rotation -= 15;
+      break;
+
+    case 'right':
+      state.rotation += 15;
+      break;
+
+    case 'in':
+      state.zoom = clamp(
+        state.zoom + 0.15,
+        0.25,
+        4
+      );
+      break;
+
+    case 'out':
+      state.zoom = clamp(
+        state.zoom - 0.15,
+        0.25,
+        4
+      );
+      break;
+
+    case 'reset':
+      state.rotation = 0;
+      state.zoom = 1;
+      state.vertical = 0;
+      break;
+
+    default:
+      return;
+  }
+
+
+  const result = getCurrentTransform(object);
+
+  if (!result) return;
+
+  smoothTransform(
+    wrapper,
+    result.rotation,
+    result.scale,
+    result.position
+  );
+}
+
+
+/* ==========================================
+   POINTER / TOUCH GESTURE SYSTEM
+========================================== */
+
+const gesturePointers = new Map();
+
+let gestureStart = null;
+
+
+function getPointerDistance(first, second) {
+  const dx = second.x - first.x;
+  const dy = second.y - first.y;
+
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+
+function getPointerCenter(first, second) {
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2
+  };
+}
+
+
+function createOneFingerBaseline(pointer) {
+  if (!active) return null;
+
+  const state = view[active.id];
+
+  return {
+    type: 'rotate',
+
+    x: pointer.x,
+    y: pointer.y,
+
+    rotation: state.rotation,
+    vertical: state.vertical
+  };
+}
+
+
+function createPinchBaseline() {
+  const pointers = [...gesturePointers.values()];
+
+  if (pointers.length < 2 || !active) return null;
+
+  const first = pointers[0];
+  const second = pointers[1];
+
+  const state = view[active.id];
+
+  return {
+    type: 'pinch',
+
+    distance: Math.max(
+      getPointerDistance(first, second),
+      1
+    ),
+
+    zoom: state.zoom,
+
+    center: getPointerCenter(first, second)
+  };
+}
+
+
+/* ==========================================
+   INSTALL TOUCH CONTROLS
+========================================== */
+
+function installTouchControls() {
+  const stage = $('#ar-stage');
+
+  if (!stage) return;
+
+  // Avoid duplicate listeners.
+
+  if (gestureCleanup) {
+    gestureCleanup();
+  }
+
+  gesturePointers.clear();
+
+  gestureStart = null;
+
+  stage.style.touchAction = 'none';
+
+
+  function onPointerDown(event) {
+    if (!active) return;
+
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
+    if (
+      event.target.closest(
+        '#ar-info, #ar-controls, button'
+      )
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    try {
+      stage.setPointerCapture(event.pointerId);
+    } catch (error) {
+      // Pointer capture may not be available
+      // on every browser implementation.
+    }
+
+    gesturePointers.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY
+    });
+
+
+    if (gesturePointers.size === 1) {
+
+      const pointer = gesturePointers.get(event.pointerId);
+
+      gestureStart = createOneFingerBaseline(pointer);
+
+    } else if (gesturePointers.size === 2) {
+
+      gestureStart = createPinchBaseline();
+
+    }
+  }
+
+
+  function onPointerMove(event) {
+    if (!gesturePointers.has(event.pointerId)) return;
+
+    if (!active || !gestureStart) return;
+
+    event.preventDefault();
+
+    const pointer = gesturePointers.get(event.pointerId);
+
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+
+
+    const state = view[active.id];
+
+    if (!state) return;
+
+
+    // ONE FINGER: ROTATE + VERTICAL MOVEMENT.
+
+    if (
+      gesturePointers.size === 1 &&
+      gestureStart.type === 'rotate'
+    ) {
+
+      const dx = event.clientX - gestureStart.x;
+      const dy = event.clientY - gestureStart.y;
+
+      state.rotation =
+        gestureStart.rotation + dx * 0.6;
+
+      state.vertical = clamp(
+        gestureStart.vertical - dy * 0.003,
+        -1.5,
+        1.5
+      );
+
+      applyGestureTransform(active);
+
+    }
+
+
+    // TWO FINGERS: PINCH ZOOM.
+
+    else if (
+      gesturePointers.size === 2 &&
+      gestureStart.type === 'pinch'
+    ) {
+
+      const pointers = [...gesturePointers.values()];
+
+      const distance = Math.max(
+        getPointerDistance(pointers[0], pointers[1]),
+        1
+      );
+
+      const zoomFactor =
+        distance / gestureStart.distance;
+
+      state.zoom = clamp(
+        gestureStart.zoom * zoomFactor,
+        0.25,
+        4
+      );
+
+      applyGestureTransform(active);
+
+    }
+  }
+
+
+  function onPointerUp(event) {
+    if (!gesturePointers.has(event.pointerId)) return;
+
+    gesturePointers.delete(event.pointerId);
+
+    if (gesturePointers.size === 0) {
+
+      gestureStart = null;
+
+    } else if (gesturePointers.size === 1) {
+
+      // Continue smoothly with the remaining finger.
+
+      const remaining = [
+        ...gesturePointers.values()
+      ][0];
+
+      gestureStart = createOneFingerBaseline(remaining);
+
+    }
+  }
+
+
+  function onPointerCancel(event) {
+    onPointerUp(event);
+  }
+
+
+  stage.addEventListener(
+    'pointerdown',
+    onPointerDown,
+    { passive: false }
+  );
+
+  stage.addEventListener(
+    'pointermove',
+    onPointerMove,
+    { passive: false }
+  );
+
+  stage.addEventListener(
+    'pointerup',
+    onPointerUp
+  );
+
+  stage.addEventListener(
+    'pointercancel',
+    onPointerCancel
+  );
+
+
+  // Save cleanup function.
+
+  gestureCleanup = () => {
+
+    stage.removeEventListener(
+      'pointerdown',
+      onPointerDown
+    );
+
+    stage.removeEventListener(
+      'pointermove',
+      onPointerMove
+    );
+
+    stage.removeEventListener(
+      'pointerup',
+      onPointerUp
+    );
+
+    stage.removeEventListener(
+      'pointercancel',
+      onPointerCancel
+    );
+
+    gesturePointers.clear();
+
+    gestureStart = null;
+
+    gestureCleanup = null;
+  };
+}
+
+
+/* ==========================================
+   START AR EXPERIENCE
+========================================== */
+
+export async function startAR() {
+  if (starting) return;
+
+  starting = true;
+
+  const currentSession = ++sessionId;
+
+  try {
+
+    resetLoading();
+
+    show('#ar', true);
+    show('#ar-loading', true);
+
+    show('#ar-info', false);
+    show('#ar-controls', false);
+    show('#ar-guide', true);
+
+    active = null;
+
+    found.clear();
+
+    if (!window.isSecureContext) {
+      throw new Error(
+        'Camera access requires HTTPS or localhost. Open the deployed HTTPS website on your phone.'
+      );
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error(
+        'Camera access is not supported by this browser.'
+      );
+    }
+
+
+    // Check target file.
+
+    if (!(await exists(TARGETS))) {
+      throw new Error(
+        'The image target file is missing. Check assets/targets/targets.mind.'
+      );
+    }
+
+
+    // Load AR libraries.
+
+    await loadARLibraries();
+
+    if (currentSession !== sessionId) return;
+
+
+    // Check model files.
+
+    await checkModels();
+
+    if (currentSession !== sessionId) return;
+
+
+    // Create scene.
+
+    createScene();
+
+    registerTargetEvents();
+
+    installTouchControls();
+
+
+    // Handle MindAR errors.
+
+    scene.addEventListener('arError', event => {
+
+      if (currentSession !== sessionId) return;
+
+      console.error(
+        '[AR VISION] MindAR error:',
+        event
+      );
+
+      fail(
+        'Camera or image tracking error. Check camera permission and try again.'
+      );
+
+    });
+
+
+    scene.addEventListener('arReady', () => {
+
+      if (currentSession !== sessionId) return;
+
+      console.log('[AR VISION] Image tracking ready.');
+
+      say(
+        'Camera ready. Point it at an AR Vision image.'
+      );
+
+    });
+
+
+    // Wait until the A-Frame scene has loaded.
+
+    if (!scene.hasLoaded) {
+      await new Promise((resolve, reject) => {
+
+        const timeout = setTimeout(() => {
+          reject(
+            new Error('AR scene loading timed out.')
+          );
+        }, 20000);
+
+        scene.addEventListener('loaded', () => {
+          clearTimeout(timeout);
+          resolve();
+        }, { once: true });
+
+      });
+    }
+
+    if (currentSession !== sessionId) return;
+
+
+    // Start image tracking.
+
+    const mindarSystem =
+      scene.systems['mindar-image-system'];
+
+    if (!mindarSystem) {
+      throw new Error(
+        'MindAR image tracking system was not found.'
+      );
+    }
+
+    await mindarSystem.start();
+
+    if (currentSession !== sessionId) return;
+
+
+    show('#ar-loading', false);
+
+    show('#ar-guide', true);
+
+    say(
+      'Point your camera at an AR Vision image.'
+    );
+
+
+    if (missing.length) {
+      console.warn(
+        '[AR VISION] Some objects are unavailable:',
+        missing.join(', ')
+      );
+    }
+
+  } catch (error) {
+
+    if (currentSession !== sessionId) return;
+
+    console.error(
+      '[AR VISION] Start error:',
+      error
+    );
+
+    await stopAR();
+
+    show('#ar', true);
+
+    fail(
+      error.message || 'Unable to start the AR experience.'
+    );
+
+  } finally {
+
+    if (currentSession === sessionId) {
+      starting = false;
+    }
+
+  }
+}
+
+
+/* ==========================================
+   STOP AR EXPERIENCE
+========================================== */
+
+export async function stopAR() {
+  // Invalidate previous asynchronous startup work.
+
+  sessionId++;
+
+  starting = false;
+
+
+  // Remove gesture listeners.
+
+  if (gestureCleanup) {
+    gestureCleanup();
+  }
+
+
+  // Stop MindAR tracking.
+
+  if (scene) {
+
+    try {
+
+      const mindarSystem =
+        scene.systems?.['mindar-image-system'];
+
+      if (mindarSystem) {
+        await mindarSystem.stop();
+      }
+
+    } catch (error) {
+
+      console.warn(
+        '[AR VISION] Camera cleanup warning:',
+        error
+      );
+
+    }
+  }
+
+
+  // Cancel model animations.
+
+  for (const object of OBJECTS) {
+
+    const wrapper = $(`#w-${object.id}`);
+
+    if (!wrapper) continue;
+
+    const frame = transformFrames.get(wrapper);
+
+    if (frame) {
+      cancelAnimationFrame(frame);
+      transformFrames.delete(wrapper);
+    }
+  }
+
+
+  // Remove AR scene.
+
+  const stage = $('#ar-stage');
+
+  if (stage) {
+    stage.innerHTML = '';
+  }
+
+
+  // Reset state.
+
+  scene = null;
+
+  active = null;
+
+  found.clear();
+
+  missing = [];
+
+  availableObjects = [];
+
+  for (const key of Object.keys(view)) {
+    delete view[key];
+  }
+
+
+  // Hide AR UI.
+
+  show('#ar-loading', false);
+  show('#ar-info', false);
+  show('#ar-controls', false);
+  show('#ar-guide', true);
+}
+
+
+/* ==========================================
+   END OF AR ENGINE
+========================================== */
