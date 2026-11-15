@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AR VISION – Scan the World. Discover Beyond Reality.</title>
+<meta name="theme-color" content="#0d1512">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css"><link rel="stylesheet" href="css/ar.css">
+</head><body>
+<div id="intro"><div class="logo" aria-label="AR VISION"><span style="animation-delay:.1s">A</span><span style="animation-delay:.18s">R</span> <b><span style="animation-delay:.3s">V</span><span style="animation-delay:.38s">I</span><span style="animation-delay:.46s">S</span><span style="animation-delay:.54s">I</span><span style="animation-delay:.62s">O</span><span style="animation-delay:.7s">N</span></b></div>
+<p>Scan the world. Discover beyond reality.</p><div class="bar"><i></i></div><button id="skip-intro" class="btn ghost">Skip</button></div>
+
+<header><a class="logo" href="#home">AR <b>VISION</b></a>
+<button id="burger" aria-label="Menu" aria-expanded="false" aria-controls="menu">☰</button>
+<nav id="menu"><a href="#home">Home</a><a href="#explore">Explore</a><a href="#how">How it works</a><a href="#about">About</a><button class="btn" data-start-ar>Start AR</button></nav></header>
+
+<main>
+<section id="home" class="hero"><div><h1>Experience science beyond reality.</h1>
+<p>Explore the invisible, discover the impossible and bring science to life through interactive augmented reality.</p>
+<div class="row"><button class="btn" data-start-ar>Start AR experience</button><a class="btn ghost" href="#explore">Explore objects</a></div></div><div class="orb" role="img" aria-label="Glowing sphere illustration"></div></section>
+<section id="explore"><h2>Objects to discover</h2><div id="cards"></div></section>
+<section id="how"><h2>How it works</h2><div class="steps">
+<div><b>1. Scan</b><p>Scan the printed educational image.</p></div>
+<div><b>2. Discover</b><p>Watch the 3D model appear in augmented reality.</p></div>
+<div><b>3. Explore</b><p>Rotate, observe and learn about the object.</p></div></div></section>
+<section id="about"><h2>About AR VISION</h2><p>AR VISION connects printed learning materials with interactive 3D models. Point your phone at a supported picture and the subject comes to life on the page, with facts you can read without leaving the camera view.</p></section>
+</main>
+<footer><div class="logo">AR <b>VISION</b></div><span>Science learning, brought to life.</span><span>Built with MindAR, A-Frame and Three.js</span><span>© 2026 AR VISION</span></footer>
+
+<div id="preview" class="hidden"><header><b id="preview-title"></b><button id="preview-close" class="btn ghost">Close</button></header><div id="preview-stage"></div></div>
+
+<div id="ar" class="hidden" role="dialog" aria-label="AR camera">
+<div id="ar-stage"></div>
+<div class="ar-top"><button id="ar-exit" class="btn">Exit</button><div style="text-align:center"><div class="logo">AR <b>VISION</b></div><div id="ar-count">0/3 discovered</div></div><span><button id="ar-restart" class="btn" aria-label="Restart camera">↻</button> <button id="ar-help" class="btn" aria-label="Help">i</button></span></div>
+<div id="ar-guide" class="hidden"></div>
+<div class="ar-bottom"><div id="ar-controls" class="hidden"><button data-act="left" aria-label="Rotate left">⟲</button><button data-act="right" aria-label="Rotate right">⟳</button><button data-act="in" aria-label="Zoom in">+</button><button data-act="out" aria-label="Zoom out">−</button><button data-act="reset" aria-label="Reset view">⌂</button></div>
+<div id="ar-info" class="hidden"><header><h3 id="info-title"></h3><button id="info-toggle">Show / hide</button></header><div id="info-body"></div></div>
+<div id="ar-status" aria-live="polite">Point your camera at an AR Vision image.</div></div>
+<div id="ar-prep" class="panel hidden"><h2>Get ready to scan</h2><ol><li>Allow camera access when asked.</li><li>Find a printed AR Vision image.</li><li>Point the camera at it and hold steady.</li><li>Rotate and zoom the 3D model.</li></ol><button id="prep-go" class="btn">Open camera</button><button id="prep-skip" class="btn ghost hidden">Skip tutorial</button></div>
+<div id="ar-loading" class="panel hidden"><div class="spin"></div><p>Starting camera and tracker…</p></div>
+<div id="ar-error" class="panel hidden"><h2>Something went wrong</h2><p id="ar-error-msg"></p><button id="err-retry" class="btn">Restart</button><button id="err-preview" class="btn ghost">Try 3D preview</button><button id="err-exit" class="btn ghost">Back to site</button></div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body></html>
